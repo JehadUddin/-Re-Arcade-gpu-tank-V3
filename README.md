@@ -1,11 +1,18 @@
-<div align="center">
+# ARCADE_GPU
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+A premium, minimalist 3D tank combat prototype built with Gfx3 and Jolt Physics.
 
-  <h1>Built with AI Studio</h2>
+## Directory Structure
+- `/components/App`: UI layers and main entry.
+- `/components/App/game`: Core game logic (Tank, Enemy, Environment).
+- `/lib`: Engine components (Gfx3, Jolt, Core).
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## Core Mechanisms
+- **Reactive System**: React manages UI and high-level intent.
+- **Decoupled Physics**: Jolt handles collisions and movement; visual components sync every frame.
+- **PERSUASION Design**: Minimalist HUD with focused combat metrics.
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
-
-</div>
+## Running the Project
+The project uses an `importmap.js` for clean module resolution.
+- Dev: `npm run dev`
+- Build: `npm run build`
