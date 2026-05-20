@@ -450,7 +450,8 @@ export class GameScreen extends Screen {
           // Environment Impact (Ground or Walls)
           // Use vector distance to catch direction changes (bounces) effectively
           const velDiff = UT.VEC3_DISTANCE(p.lastVel, [curV.GetX(), curV.GetY(), curV.GetZ()]);
-          const impacted = pPos.GetY() < -15.0 || (p.life < 4.96 && velDiff > 8);
+          // Grant 0.1s of immunity to impact detection (was 0.04s) and increase threshold
+          const impacted = pPos.GetY() < -15.0 || (p.life < 4.90 && velDiff > 12);
 
           if (impacted) {
               this.onProjectileEnvironmentImpact(p, pPos3);

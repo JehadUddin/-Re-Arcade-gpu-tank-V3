@@ -133,8 +133,8 @@ export class Environment {
             this.decorations.push({ type: 'leaves', pos: [x, trunkHeight + leavesHeight / 2 - 0.5, z], scale: [leavesSize, leavesHeight, leavesSize] });
             
             gfx3JoltManager.addBox({
-                width: 1.5, height: 15, depth: 1.5,
-                x, y: 5, z,
+                width: 0.8, height: trunkHeight, depth: 0.8,
+                x, y: treeY, z,
                 motionType: Gfx3Jolt.EMotionType_Static,
                 layer: JOLT_LAYER_NON_MOVING
             });
@@ -198,14 +198,22 @@ export class Environment {
 
     for (const dec of this.decorations) {
         let geo: any;
+        let scale: vec3 = dec.scale;
+        
         if (dec.type === 'trunk') geo = createBoxGeo(1, 1, 1, [0.4, 0.25, 0.1]);
         else if (dec.type === 'leaves') geo = createBoxGeo(1, 1, 1, [0.2, 0.6, 0.1]);
         else if (dec.type === 'building') geo = createBoxGeo(1, 1, 1, [0.55, 0.55, 0.6]);
-        else if (dec.type === 'wallN' || dec.type === 'wallS') geo = createBoxGeo(400, 40, 20, [0.3, 0.4, 0.3]);
-        else if (dec.type === 'wallE' || dec.type === 'wallW') geo = createBoxGeo(20, 40, 400, [0.3, 0.4, 0.3]);
+        else if (dec.type === 'wallN' || dec.type === 'wallS') {
+            geo = createBoxGeo(400, 40, 20, [0.3, 0.4, 0.3]);
+            scale = [1, 1, 1];
+        }
+        else if (dec.type === 'wallE' || dec.type === 'wallW') {
+            geo = createBoxGeo(20, 40, 400, [0.3, 0.4, 0.3]);
+            scale = [1, 1, 1];
+        }
         else geo = createBoxGeo(1, 1, 1, [0.6, 0.55, 0.45]);
         
-        const mat = UT.MAT4_TRANSFORM(dec.pos, ZERO, dec.type.includes('wall') ? [1,1,1] : dec.scale, Q);
+        const mat = UT.MAT4_TRANSFORM(dec.pos, ZERO, scale, Q);
         geos.push({ geo, matrix: mat });
     }
 

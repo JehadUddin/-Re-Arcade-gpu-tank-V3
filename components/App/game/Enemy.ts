@@ -239,8 +239,8 @@ export class Enemy {
     const matBarrelWorld = UT.MAT4_MULTIPLY(matTurretWorld, matBarrelLocal);
     
     // Tip Offset (-Z)
-    // Barrel mesh is 2.25 units deep. We push it slightly further out to avoid self-collision.
-    const tipOffset = -1.625;
+    // Barrel mesh is 2.25 units deep. We push it 1.5 units FURTHER out to avoid self-collision.
+    const tipOffset = -3.0;
     const muzzlePos = UT.MAT4_MULTIPLY_BY_VEC3(matBarrelWorld, [0, 0, tipOffset]);
     const dir = UT.VEC3_NORMALIZE(UT.VEC3_SUBSTRACT(muzzlePos, UT.MAT4_MULTIPLY_BY_VEC3(matBarrelWorld, [0, 0, 0])));
     

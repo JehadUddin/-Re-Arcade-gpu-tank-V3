@@ -68,11 +68,17 @@ export class Tank {
     this.antenna = createBoxMesh(0.05, 1.5, 0.05, [0.1, 0.1, 0.1]);
 
     this.physicsBody = gfx3JoltManager.addBox({
-      width: 3.45, height: 1.5, depth: 3.6,
+      width: 2.15, height: 0.8, depth: 3.2,
       x: 0, y: 25, z: 0,
       motionType: Gfx3Jolt.EMotionType_Dynamic,
       layer: JOLT_LAYER_MOVING,
-      settings: { mAngularDamping: 4.0, mLinearDamping: 2.0, mMassPropertiesOverride: 3000.0 } 
+      settings: { 
+        mAngularDamping: 4.0, 
+        mLinearDamping: 2.0, 
+        mMassPropertiesOverride: 3000.0,
+        mFriction: 0.1,      // Low friction for smoother sliding against walls
+        mRestitution: 0.05   // Very low bounce
+      } 
     });
   }
 
@@ -104,7 +110,7 @@ export class Tank {
    */
   update(ts: number, moveDir: { x: number, y: number }, fireNormal: boolean, fireGrenade: boolean, cameraYaw: number = 0, cameraPitch: number = 0, level?: Environment): { normal: boolean, grenade: boolean } {
     const speed = 10;
-    const rotSpeed = 1.8;
+    const rotSpeed = 2.0;
 
     let didShootNormal = false;
     let didShootGrenade = false;
@@ -125,16 +131,17 @@ export class Tank {
     this.grenadeRecoil -= (ts / 1000) * 2; // Grenades have slower fire rate
     if (this.grenadeRecoil < 0) this.grenadeRecoil = 0;
     
-    // Steering Logic
+    // Steering Logic - Only affect Y angular velocity to preserve physics-driven pitch/roll
+    const curAngVel = this.physicsBody.body.GetAngularVelocity();
     const targetAngularVelY = -moveDir.x * rotSpeed;
-    const joltAngVel = new Gfx3Jolt.Vec3(0, targetAngularVelY, 0);
+    const joltAngVel = new Gfx3Jolt.Vec3(curAngVel.GetX(), targetAngularVelY, curAngVel.GetZ());
     gfx3JoltManager.bodyInterface.SetAngularVelocity(this.physicsBody.body.GetID(), joltAngVel);
 
     // Get physics rotation to extract current yaw
     const currentRot = this.physicsBody.body.GetRotation();
     const currentPhysQ = new Quaternion(currentRot.GetW(), currentRot.GetX(), currentRot.GetY(), currentRot.GetZ());
     
-    // Propperly extract world yaw from the physics body orientation
+    // Properly extract world yaw from the physics body orientation
     // We look at where the mesh forward (-Z) is pointing.
     const meshForward = currentPhysQ.rotateVector([0, 0, -1]);
     const physYaw = Math.atan2(meshForward[0], -meshForward[2]);
@@ -143,7 +150,7 @@ export class Tank {
     
     const throttle = moveDir.y;
     const targetVelocity = throttle * speed;
-    const accelRate = throttle !== 0 ? 0.05 : 0.1;
+    const accelRate = throttle !== 0 ? 0.08 : 0.15; // Snappier acceleration
     this.velocity = UT.LERP(this.velocity, targetVelocity, accelRate);
 
     // Physics Update - Move along mesh forward (-Z direction at rotation 0)
@@ -154,13 +161,13 @@ export class Tank {
     
     // Instead of hard-setting velocity which fights the collision solver, 
     // we use a PD controller approach (adding forces) to approach the target velocity.
-    const mass = 3000.0; // matching mMassPropertiesOverride
+    const mass = 3000.0;
     const velDiffX = linVel[0] - curVel.GetX();
     const velDiffZ = linVel[2] - curVel.GetZ();
     
-    // Proportional gain for the velocity controller - reduced for a "heavier" inertia feel
-    const kp = 4.0; 
-    const maxForce = 50000.0; // Higher force needed to move 3000kg
+    // Proportional gain for the velocity controller
+    const kp = 6.0; 
+    const maxForce = 60000.0; 
     const forceX = Math.max(-maxForce, Math.min(maxForce, velDiffX * mass * kp));
     const forceZ = Math.max(-maxForce, Math.min(maxForce, velDiffZ * mass * kp));
     
@@ -169,30 +176,32 @@ export class Tank {
     
     const pos = this.physicsBody.body.GetPosition();
 
-    // Grounding failsafe (optimized for flat terrain)
-    const bottomY = pos.GetY() - 0.75; // Physics center is at 0.75
-    if (bottomY < -0.05) { // If bottom is below flat ground (y=0)
-        const penetration = -0.05 - bottomY;
-        const upForce = penetration * 40000; // Strong push back to surface
-        gfx3JoltManager.bodyInterface.AddForce(this.physicsBody.body.GetID(), new Gfx3Jolt.Vec3(0, upForce, 0), Gfx3Jolt.EActivation_Activate);
-        // Kill downward momentum
-        const currentVel = this.physicsBody.body.GetLinearVelocity();
-        if (currentVel.GetY() < 0) {
-            gfx3JoltManager.bodyInterface.SetLinearVelocity(this.physicsBody.body.GetID(), new Gfx3Jolt.Vec3(currentVel.GetX(), 0, currentVel.GetZ()));
+    // Grounding failsafe (Softened to avoid popping, helps when clipped or airborne)
+    const bottomY = pos.GetY() - 0.4; 
+    if (bottomY < -0.1) { 
+        const penetration = -0.1 - bottomY;
+        const upForce = penetration * 20000; // Softer correction
+        gfx3JoltManager.bodyInterface.AddImpulse(this.physicsBody.body.GetID(), new Gfx3Jolt.Vec3(0, upForce * (ts/1000), 0));
+        
+        // Dampen downward velocity if penetrating
+        if (curVel.GetY() < -1.0) {
+            gfx3JoltManager.bodyInterface.SetLinearVelocity(this.physicsBody.body.GetID(), new Gfx3Jolt.Vec3(curVel.GetX(), curVel.GetY() * 0.8, curVel.GetZ()));
         }
     }
 
     const visualYawQ = Quaternion.createFromEuler(this.rotation, 0, 0, 'YXZ');
     
-    // Get ground normal from a single center ray - much more stable than 4 corners for physics
+    // Improved Ground Mapping: Cast a ray to find the surface normal
     let targetUp: vec3 = [0, 1, 0];
-    const ray = gfx3JoltManager.createRay(pos.GetX(), pos.GetY() + 0.5, pos.GetZ(), pos.GetX(), pos.GetY() - 2.5, pos.GetZ());
-    if (ray.normal && ray.normal.GetY() > 0.5) {
+    const ray = gfx3JoltManager.createRay(pos.GetX(), pos.GetY() + 0.5, pos.GetZ(), pos.GetX(), pos.GetY() - 3.0, pos.GetZ());
+    
+    // Only accept normals that are mostly vertical (> 45 degrees) to ignore walls
+    if (ray.normal && ray.normal.GetY() > 0.707) {
         targetUp = [ray.normal.GetX(), ray.normal.GetY(), ray.normal.GetZ()];
     }
     
-    // Smoothly lerp the current up vector towards the ground normal
-    this.currentUp = UT.VEC3_LERP(this.currentUp, targetUp, 6.0 * (ts / 1000));
+    // Smoothly lerp towards ground orientation
+    this.currentUp = UT.VEC3_LERP(this.currentUp, targetUp, 8.0 * (ts / 1000));
     this.currentUp = UT.VEC3_NORMALIZE(this.currentUp);
 
     const up: vec3 = [0, 1, 0];
@@ -210,9 +219,9 @@ export class Tank {
     }
 
     // Sync Visual State for draw()
-    // Physics center is at 0.75 from bottom (Height 1.5). Visual center is at 0.45 from bottom.
-    // Offset = -0.75 + 0.45 = -0.3
-    this.visualPos = [pos.GetX(), pos.GetY() - 0.3, pos.GetZ()];
+    // Physics center is at 0.4 from bottom (Height 0.8). Visual center is at 0.45 from bottom.
+    // Offset = -0.4 + 0.45 = +0.05
+    this.visualPos = [pos.GetX(), pos.GetY() + 0.05, pos.GetZ()];
     this.visualQ = visualQ;
     
     // Update Turret Yaw to follow camera (0 = -Z in atan2(x, -z) space)
@@ -249,8 +258,8 @@ export class Tank {
     const matBarrelWorld = UT.MAT4_MULTIPLY(matTurretWorld, matBarrelLocal);
 
     // Tip Offset (-Z)
-    // Barrel mesh is 2.25 units deep. We push it 0.5 units further out to avoid self-collision.
-    const tipOffset = -1.625; 
+    // Barrel mesh is 2.25 units deep. We push it 1.5 units FURTHER out to avoid self-collision when turning.
+    const tipOffset = -3.0; 
     const muzzlePos = UT.MAT4_MULTIPLY_BY_VEC3(matBarrelWorld, [0, 0, tipOffset]);
     const dir = UT.VEC3_NORMALIZE(UT.VEC3_SUBSTRACT(muzzlePos, UT.MAT4_MULTIPLY_BY_VEC3(matBarrelWorld, [0, 0, 0])));
 
