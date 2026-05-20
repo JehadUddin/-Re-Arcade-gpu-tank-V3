@@ -34,12 +34,15 @@ export enum ProjectileType {
 }
 
 export interface Projectile {
-  body: any;
+  pos: vec3;
+  vel: vec3;
+  gravity: number;
   life: number;
   type: ProjectileType;
   ownerId: string;
   mesh: Gfx3Mesh;
   lastVel: vec3;
+  rotation: Quaternion;
 }
 
 export class GameScreen extends Screen {
@@ -127,6 +130,10 @@ export class GameScreen extends Screen {
     inputManager.registerAction('keyboard', 'KeyS', 'THR_BWD');
     inputManager.registerAction('keyboard', 'KeyA', 'STR_LFT');
     inputManager.registerAction('keyboard', 'KeyD', 'STR_RGT');
+    inputManager.registerAction('keyboard', 'ArrowUp', 'THR_FWD');
+    inputManager.registerAction('keyboard', 'ArrowDown', 'THR_BWD');
+    inputManager.registerAction('keyboard', 'ArrowLeft', 'STR_LFT');
+    inputManager.registerAction('keyboard', 'ArrowRight', 'STR_RGT');
     inputManager.registerAction('keyboard', 'KeyQ', 'CAM_L');
     inputManager.registerAction('keyboard', 'KeyC', 'CAM_R');
     inputManager.registerAction('keyboard', 'KeyR', 'CAM_Z_IN');
@@ -325,15 +332,11 @@ export class GameScreen extends Screen {
     const ZERO: vec3 = [0, 0, 0];
 
     for (const p of this.projectiles) {
-       const pPos = p.body.body.GetPosition();
-       const pRot = p.body.body.GetRotation();
-       const q = new Quaternion(pRot.GetW(), pRot.GetX(), pRot.GetY(), pRot.GetZ());
-       
        const matProj = UT.MAT4_TRANSFORM(
-           [pPos.GetX(), pPos.GetY(), pPos.GetZ()], 
+           p.pos, 
            ZERO, 
            p.type === ProjectileType.GRENADE ? scaleGrenade : scaleShell, 
-           q
+           p.rotation
        );
        gfx3MeshRenderer.drawMesh(p.mesh, matProj);
     }
@@ -345,77 +348,76 @@ export class GameScreen extends Screen {
 
     const direction = finalQ.rotateVector([0, 0, -1]);
     const pMesh = type === ProjectileType.GRENADE ? this.grenadeMesh : this.shellMesh;
-    
-    // Physics body
-    const pBody = gfx3JoltManager.addBox({
-      width: type === ProjectileType.GRENADE ? 0.6 : 0.4,
-      height: type === ProjectileType.GRENADE ? 0.6 : 0.4,
-      depth: type === ProjectileType.GRENADE ? 0.6 : 0.6,
-      x: x, y: finalY, z: z,
-      rotation: new Gfx3Jolt.Quat(finalQ.x, finalQ.y, finalQ.z, finalQ.w),
-      motionType: Gfx3Jolt.EMotionType_Dynamic,
-      layer: JOLT_LAYER_MOVING,
-      settings: { 
-          mMassPropertiesOverride: 0.1, 
-          mRestitution: 0.025 // Reduced bounce by 75%
-      }
-    });
-
-    if (type === ProjectileType.SHELL) {
-        gfx3JoltManager.bodyInterface.SetGravityFactor(pBody.body.GetID(), 0); // Shells never drop
-    }
 
     let forwardSpeed = type === ProjectileType.GRENADE ? 30 : 120; // Faster shells for linear feel
     let upwardVel = type === ProjectileType.GRENADE ? 15 : 0;
     
     forwardSpeed *= speedMod;
 
-    const pVel = new Gfx3Jolt.Vec3(
+    const pVel: vec3 = [
       direction[0] * forwardSpeed, 
       (direction[1] * forwardSpeed) + upwardVel, 
       direction[2] * forwardSpeed
-    );
-    gfx3JoltManager.bodyInterface.SetLinearVelocity(pBody.body.GetID(), pVel);
+    ];
 
-    if (type === ProjectileType.GRENADE) {
-        const angVel = new Gfx3Jolt.Vec3((Math.random() - 0.5) * 40, (Math.random() - 0.5) * 40, (Math.random() - 0.5) * 40);
-        gfx3JoltManager.bodyInterface.SetAngularVelocity(pBody.body.GetID(), angVel);
-    }
+    const gravity = type === ProjectileType.GRENADE ? -18.0 : 0.0;
 
     this.projectiles.push({
-      body: pBody,
+      pos: [x, finalY, z],
+      vel: pVel,
+      gravity,
       life: 5.0,
       type,
       ownerId,
       mesh: pMesh,
-      lastVel: [pVel.GetX(), pVel.GetY(), pVel.GetZ()]
+      lastVel: [...pVel] as vec3,
+      rotation: finalQ
     });
   }
 
   updateProjectiles(ts: number) {
+    const dt = ts / 1000;
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
-      p.life -= ts / 1000;
-
-      const pPos = p.body.body.GetPosition();
-      const pPos3: vec3 = [pPos.GetX(), pPos.GetY(), pPos.GetZ()];
-      const curV = p.body.body.GetLinearVelocity();
+      p.life -= dt;
 
       if (p.life <= 0) {
         // Explode on life expiry for grenades
         if (p.type === ProjectileType.GRENADE) {
-            this.onProjectileEnvironmentImpact(p, pPos3);
+            this.onProjectileEnvironmentImpact(p, p.pos);
         }
-        gfx3JoltManager.remove(p.body.bodyId);
         this.projectiles.splice(i, 1);
         continue;
       }
-      
+
+      // Update position with velocity
+      p.pos[0] += p.vel[0] * dt;
+      p.pos[1] += p.vel[1] * dt;
+      p.pos[2] += p.vel[2] * dt;
+
+      // Apply gravitation
+      p.vel[1] += p.gravity * dt;
+
+      // Update rotation for shells to point in direction of travel
+      if (p.type === ProjectileType.SHELL) {
+          const velLen = Math.sqrt(p.vel[0]*p.vel[0] + p.vel[1]*p.vel[1] + p.vel[2]*p.vel[2]);
+          if (velLen > 0.1) {
+             const dir = UT.VEC3_NORMALIZE(p.vel);
+             const yaw = Math.atan2(-dir[0], -dir[2]);
+             const pitch = Math.asin(dir[1]);
+             p.rotation = Quaternion.createFromEuler(yaw, pitch, 0, 'YXZ');
+          }
+      } else {
+          // Grenades spin randomly on all axes
+          const spin = Quaternion.createFromEuler(dt * 5, dt * 5, dt * 5, 'YXZ');
+          p.rotation = p.rotation.mul(spin.w, spin.x, spin.y, spin.z);
+      }
+
       // Trails
       if (p.type === ProjectileType.GRENADE && Math.random() < 0.15) {
           const exp = this.explosionPool.acquire() as Explosion;
           if (exp) {
-              exp.reset(pPos3[0], pPos3[1], pPos3[2], [0.4, 0.4, 0.4], undefined, 1.2, 'trail');
+              exp.reset(p.pos[0], p.pos[1], p.pos[2], [0.4, 0.4, 0.4], undefined, 1.2, 'trail');
               this.explosions.push(exp);
           }
       }
@@ -428,10 +430,10 @@ export class GameScreen extends Screen {
           for (const enemy of this.enemies) {
               if (enemy.hp <= 0) continue;
               const ePos = enemy.physicsBody.body.GetPosition();
-              const dist = UT.VEC3_DISTANCE(pPos3, [ePos.GetX(), ePos.GetY() + 0.3, ePos.GetZ()]); // Offset y a bit to reach center of gravity
+              const dist = UT.VEC3_DISTANCE(p.pos, [ePos.GetX(), ePos.GetY() + 0.3, ePos.GetZ()]); // Offset y a bit to reach center of gravity
               
               if (dist < 3.5) {
-                  this.onProjectileHit(p, enemy, pPos3);
+                  this.onProjectileHit(p, enemy, p.pos);
                   destroyed = true;
                   break;
               }
@@ -439,44 +441,57 @@ export class GameScreen extends Screen {
       } else {
           // Enemy projectiles vs Player
           const pPosPlayer = this.tank.visualPos;
-          const distToPlayer = UT.VEC3_DISTANCE(pPos3, [pPosPlayer[0], pPosPlayer[1] + 0.5, pPosPlayer[2]]);
+          const distToPlayer = UT.VEC3_DISTANCE(p.pos, [pPosPlayer[0], pPosPlayer[1] + 0.5, pPosPlayer[2]]);
           if (distToPlayer < 3.5) {
-              this.onProjectileHit(p, this.tank, pPos3);
+              this.onProjectileHit(p, this.tank, p.pos);
               destroyed = true;
           }
       }
 
       if (!destroyed) {
-          // Environment Impact (Ground or Walls)
-          // Use vector distance to catch direction changes (bounces) effectively
-          const velDiff = UT.VEC3_DISTANCE(p.lastVel, [curV.GetX(), curV.GetY(), curV.GetZ()]);
-          // Grant 0.1s of immunity to impact detection (was 0.04s) and increase threshold
-          const impacted = pPos.GetY() < -15.0 || (p.life < 4.90 && velDiff > 12);
+          let hitEnv = false;
 
-          if (impacted) {
-              this.onProjectileEnvironmentImpact(p, pPos3);
+          // Ground check
+          if (p.pos[1] <= 0.0) {
+              p.pos[1] = 0.0;
+              hitEnv = true;
+          }
+
+          // Bound walls check (Size of map is 400x400)
+          if (Math.abs(p.pos[0]) >= 195 || Math.abs(p.pos[2]) >= 195) {
+              hitEnv = true;
+          }
+
+          // Building and obstacle collision check
+          if (this.level && this.level.decorations) {
+              for (const dec of this.level.decorations) {
+                  if (dec.type === 'trunk' || dec.type === 'leaves') continue;
+                  
+                  const halfW = dec.scale[0] / 2;
+                  const halfH = dec.scale[1] / 2;
+                  const halfD = dec.scale[2] / 2;
+
+                  if (
+                      p.pos[0] >= dec.pos[0] - halfW && p.pos[0] <= dec.pos[0] + halfW &&
+                      p.pos[1] >= dec.pos[1] - halfH && p.pos[1] <= dec.pos[1] + halfH &&
+                      p.pos[2] >= dec.pos[2] - halfD && p.pos[2] <= dec.pos[2] + halfD
+                  ) {
+                      hitEnv = true;
+                      break;
+                  }
+              }
+          }
+
+          if (hitEnv) {
+              this.onProjectileEnvironmentImpact(p, p.pos);
               destroyed = true;
           }
       }
 
       if (destroyed) {
-          gfx3JoltManager.remove(p.body.bodyId);
           this.projectiles.splice(i, 1);
       } else {
-          p.lastVel = [curV.GetX(), curV.GetY(), curV.GetZ()];
-          
-          // Self-orient shells (not grenades)
-          if (p.type === ProjectileType.SHELL) {
-             const velLen = Math.sqrt(curV.GetX()*curV.GetX() + curV.GetY()*curV.GetY() + curV.GetZ()*curV.GetZ());
-             if (velLen > 0.1) {
-                const dir = UT.VEC3_NORMALIZE([curV.GetX(), curV.GetY(), curV.GetZ()]);
-                const yaw = Math.atan2(-dir[0], -dir[2]);
-                const pitch = Math.asin(dir[1]);
-                const q = Quaternion.createFromEuler(yaw, pitch, 0, 'YXZ');
-                const joltQuat = new Gfx3Jolt.Quat(q.x, q.y, q.z, q.w);
-                gfx3JoltManager.bodyInterface.SetRotation(p.body.body.GetID(), joltQuat, Gfx3Jolt.EActivation_Activate);
-             }
-          }
+          p.lastVel = [...p.vel] as vec3;
       }
     }
   }

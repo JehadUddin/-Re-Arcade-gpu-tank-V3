@@ -127,17 +127,18 @@ export class Environment {
             const treeY = trunkHeight / 2;
             this.decorations.push({ type: 'trunk', pos: [x, treeY, z], scale: [0.8, trunkHeight, 0.8] });
             
+            // Register trunk physics shape to act as static obstacle
+            gfx3JoltManager.addBox({
+                width: 0.8, height: trunkHeight, depth: 0.8,
+                x: x, y: treeY, z: z,
+                motionType: Gfx3Jolt.EMotionType_Static,
+                layer: JOLT_LAYER_NON_MOVING
+            });
+            
             // Leaves
             const leavesHeight = 3 + Math.random() * 2;
             const leavesSize = 3 + Math.random();
             this.decorations.push({ type: 'leaves', pos: [x, trunkHeight + leavesHeight / 2 - 0.5, z], scale: [leavesSize, leavesHeight, leavesSize] });
-            
-            gfx3JoltManager.addBox({
-                width: 0.8, height: trunkHeight, depth: 0.8,
-                x, y: treeY, z,
-                motionType: Gfx3Jolt.EMotionType_Static,
-                layer: JOLT_LAYER_NON_MOVING
-            });
         } else if (type < 0.7) {
             // Building
             const width = 10 + Math.random() * 15;
@@ -146,9 +147,10 @@ export class Environment {
             const bY = height / 2 - 0.5;
             this.decorations.push({ type: 'building', pos: [x, bY, z], scale: [width, height, depth] });
             
+            // Register building physics shape to act as static obstacle
             gfx3JoltManager.addBox({
-                width, height, depth,
-                x, y: bY, z,
+                width: width, height: height, depth: depth,
+                x: x, y: bY, z: z,
                 motionType: Gfx3Jolt.EMotionType_Static,
                 layer: JOLT_LAYER_NON_MOVING
             });
@@ -165,9 +167,10 @@ export class Environment {
             
             this.decorations.push({ type: 'sandWall', pos: [x, wY, z], scale: [wallW, height, wallD] });
             
+            // Register wall physics shape to act as static obstacle
             gfx3JoltManager.addBox({
-                width: wallW, height, depth: wallD,
-                x, y: wY, z,
+                width: wallW, height: height, depth: wallD,
+                x: x, y: wY, z: z,
                 motionType: Gfx3Jolt.EMotionType_Static,
                 layer: JOLT_LAYER_NON_MOVING
             });

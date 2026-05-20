@@ -86,12 +86,18 @@ export class Enemy {
 
     // Dimensions match player Tank for consistency
     // Hull(2.25, 0.9, 3.3) + 2*Tracks(0.6, 0.9, 3.6) = 3.45 width, 3.6 depth
-    this.physicsBody = gfx3JoltManager.addBox({
-      width: 3.45, height: 1.5, depth: 3.6, 
+    this.physicsBody = gfx3JoltManager.addCylinder({
+      radius: 1.6, height: 1.5,
       x, y, z,
       motionType: Gfx3Jolt.EMotionType_Dynamic,
       layer: JOLT_LAYER_MOVING,
-      settings: { mAngularDamping: 5.0, mLinearDamping: 2.0, mMassPropertiesOverride: 3000.0 }
+      settings: { 
+        mAngularDamping: 5.0, 
+        mLinearDamping: 2.0, 
+        mMassPropertiesOverride: 3000.0,
+        mFriction: 0.05,     // Slick sliding for smoother AI tracking
+        mRestitution: 0.05
+      }
     });
   }
 
@@ -128,23 +134,27 @@ export class Enemy {
     
     const targetAngle = Math.atan2(-dx, -dz);
     
-    // Smooth rotation towards target
+    // Smooth direct rotation towards player targetAngle
     const PI2 = Math.PI * 2;
     let angleDiff = (targetAngle - this.rotation) % PI2;
     if (angleDiff > Math.PI) angleDiff -= PI2;
     if (angleDiff < -Math.PI) angleDiff += PI2;
     
     const rotSpeed = 2.0;    
-    
-    // Use SetAngularVelocity for stable steering
-    const joltAngVel = new Gfx3Jolt.Vec3(0, Math.sign(angleDiff) * Math.min(Math.abs(angleDiff) * 5.0, rotSpeed), 0);
-    gfx3JoltManager.bodyInterface.SetAngularVelocity(this.physicsBody.body.GetID(), joltAngVel);
+    const step = rotSpeed * (ts / 1000);
+    if (Math.abs(angleDiff) < step) {
+        this.rotation = targetAngle;
+    } else {
+        this.rotation += Math.sign(angleDiff) * step;
+    }
 
-    // Update this.rotation from the actual physics body to prevent visual drift
-    const currentRot = this.physicsBody.body.GetRotation();
-    const qPhys = new Quaternion(currentRot.GetW(), currentRot.GetX(), currentRot.GetY(), currentRot.GetZ());
-    const [[ax, ay, az], angle] = qPhys.toAxisAngle();
-    this.rotation = ay > 0 ? angle : -angle; 
+    // Enforce flat physics rotation (0 pitch/roll) to completely prevent enemy corners from penetrating the floor
+    const qLock = Quaternion.createFromEuler(this.rotation, 0, 0, 'YXZ');
+    const joltQuat = new Gfx3Jolt.Quat(qLock.x, qLock.y, qLock.z, qLock.w);
+    gfx3JoltManager.bodyInterface.SetRotation(this.physicsBody.body.GetID(), joltQuat, Gfx3Jolt.EActivation_Activate);
+
+    // Ensure Jolt's internal angular velocity is zeroed out to prevent any solver-induced rotation battles
+    gfx3JoltManager.bodyInterface.SetAngularVelocity(this.physicsBody.body.GetID(), new Gfx3Jolt.Vec3(0, 0, 0));
 
     // Simple Chase - Stop when close
     const speed = 5;
@@ -155,29 +165,85 @@ export class Enemy {
         throttle = -0.5; // Back up a bit
     }
 
+    // Force active state if we have movement/steering intentions to avoid Jolt sleep
+    if (throttle !== 0.0 || Math.abs(angleDiff) > 0.1) {
+        gfx3JoltManager.bodyInterface.ActivateBody(this.physicsBody.body.GetID());
+    }
+
     const forward = [Math.sin(this.rotation), 0, -Math.cos(this.rotation)] as vec3;
     const linVel = UT.VEC3_SCALE(forward, throttle * speed);
     
+    const curPos = this.physicsBody.body.GetPosition();
     const curVel = this.physicsBody.body.GetLinearVelocity();
     
-    const mass = 3000.0;
-    const velDiffX = linVel[0] - curVel.GetX();
-    const velDiffZ = linVel[2] - curVel.GetZ();
-    const kp = 4.0;
-    const maxForce = 40000.0;
-    const forceX = Math.max(-maxForce, Math.min(maxForce, velDiffX * mass * kp));
-    const forceZ = Math.max(-maxForce, Math.min(maxForce, velDiffZ * mass * kp));
-    const joltForce = new Gfx3Jolt.Vec3(forceX, 0, forceZ);
-    gfx3JoltManager.bodyInterface.AddForce(this.physicsBody.body.GetID(), joltForce, Gfx3Jolt.EActivation_Activate);
+    // Whiskers multi-raycast sliding prediction for Enemy to prevent phasing completely!
+    let finalLinVel = [linVel[0], linVel[2]];
+    const speedLen = Math.sqrt(linVel[0] * linVel[0] + linVel[2] * linVel[2]);
+    if (speedLen > 0.01) {
+        const dx = linVel[0] / speedLen;
+        const dz = linVel[2] / speedLen;
+        
+        // 3 directions: center (0°), left (-30°), right (+30°)
+        const dirs = [
+            [dx, dz],
+            [dx * 0.866 - dz * 0.5, dx * 0.5 + dz * 0.866],
+            [dx * 0.866 + dz * 0.5, -dx * 0.5 + dz * 0.866]
+        ];
+        
+        const rayLength = 1.6 + 0.45; // Enemy radius is 1.6
+        
+        for (const dir of dirs) {
+            const startX = curPos.GetX();
+            const startY = curPos.GetY();
+            const startZ = curPos.GetZ();
+            
+            const endX = startX + dir[0] * rayLength;
+            const endY = startY;
+            const endZ = startZ + dir[1] * rayLength;
+            
+            const ray = gfx3JoltManager.createRay(startX, startY, startZ, endX, endY, endZ);
+            if (ray.body && ray.normal) {
+                const hitBodyId = ray.body.GetID().GetIndex();
+                const ourBodyId = this.physicsBody.body.GetID().GetIndex();
+                if (hitBodyId !== ourBodyId) {
+                    const nx = ray.normal.GetX();
+                    const nz = ray.normal.GetZ();
+                    const nLen = Math.sqrt(nx * nx + nz * nz);
+                    if (nLen > 0.001) {
+                        const hnx = nx / nLen;
+                        const hnz = nz / nLen;
+                        
+                        // Dot product between desired velocity and normal
+                        const dot = finalLinVel[0] * hnx + finalLinVel[1] * hnz;
+                        if (dot < 0) {
+                            // Substract the component that pushes into the wall
+                            finalLinVel[0] -= dot * hnx;
+                            finalLinVel[1] -= dot * hnz;
+                        }
+                    }
+                }
+            }
+        }
+    }
     
-    const curPos = this.physicsBody.body.GetPosition();
+    // Direct velocity assignment for enemies keeping gravity y velocity intact
+    const runVel = new Gfx3Jolt.Vec3(finalLinVel[0], curVel.GetY(), finalLinVel[1]);
+    gfx3JoltManager.bodyInterface.SetLinearVelocity(this.physicsBody.body.GetID(), runVel);
+    
     const visualYawQ = Quaternion.createFromEuler(this.rotation, 0, 0, 'YXZ');
     
     // Smooth banking visuals
     let targetUp: vec3 = [0, 1, 0];
-    const ray = gfx3JoltManager.createRay(curPos.GetX(), curPos.GetY() + 0.5, curPos.GetZ(), curPos.GetX(), curPos.GetY() - 2.5, curPos.GetZ());
+    // Start raycast slightly below the physical bottom (0.75 below center) to avoid hitting ourselves
+    const startY = curPos.GetY() - 0.77;
+    const ray = gfx3JoltManager.createRay(curPos.GetX(), startY, curPos.GetZ(), curPos.GetX(), curPos.GetY() - 2.5, curPos.GetZ());
     if (ray.normal && ray.normal.GetY() > 0.5) {
-        targetUp = [ray.normal.GetX(), ray.normal.GetY(), ray.normal.GetZ()];
+        // Double check we didn't hit our own body ID in case of overlaps
+        const hitBodyId = ray.body ? ray.body.GetID().GetIndex() : -1;
+        const ourBodyId = this.physicsBody.body.GetID().GetIndex();
+        if (hitBodyId !== ourBodyId) {
+            targetUp = [ray.normal.GetX(), ray.normal.GetY(), ray.normal.GetZ()];
+        }
     }
     
     this.currentUp = UT.VEC3_LERP(this.currentUp, targetUp, 6.0 * (ts / 1000));

@@ -1,6 +1,6 @@
 {
   "name": "Remix: re Arcade gpu tank V3",
-  "description": "Example React app using Gemini",
+  "description": "A highly polished 3D tank combat simulation featuring real-time collision resolution, customizable vehicle rotation mapping, and premium responsive control schemes.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

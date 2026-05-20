@@ -67,8 +67,8 @@ export class Tank {
     this.hatch = createBoxMesh(0.6, 0.15, 0.6, [0.15, 0.15, 0.15]);
     this.antenna = createBoxMesh(0.05, 1.5, 0.05, [0.1, 0.1, 0.1]);
 
-    this.physicsBody = gfx3JoltManager.addBox({
-      width: 2.15, height: 0.8, depth: 3.2,
+    this.physicsBody = gfx3JoltManager.addCylinder({
+      radius: 1.3, height: 0.8,
       x: 0, y: 0.5, z: 0,
       motionType: Gfx3Jolt.EMotionType_Dynamic,
       layer: JOLT_LAYER_MOVING,
@@ -76,7 +76,7 @@ export class Tank {
         mAngularDamping: 4.0, 
         mLinearDamping: 2.0, 
         mMassPropertiesOverride: 3000.0,
-        mFriction: 0.1,      // Low friction for smoother sliding against walls
+        mFriction: 0.05,     // Negligible friction for extremely slick sliding against obstacles
         mRestitution: 0.05   // Very low bounce
       } 
     });
@@ -131,22 +131,25 @@ export class Tank {
     this.grenadeRecoil -= (ts / 1000) * 2; // Grenades have slower fire rate
     if (this.grenadeRecoil < 0) this.grenadeRecoil = 0;
     
-    // Steering Logic - Only affect Y angular velocity to preserve physics-driven pitch/roll
-    const curAngVel = this.physicsBody.body.GetAngularVelocity();
-    const targetAngularVelY = -moveDir.x * rotSpeed;
-    const joltAngVel = new Gfx3Jolt.Vec3(curAngVel.GetX(), targetAngularVelY, curAngVel.GetZ());
-    gfx3JoltManager.bodyInterface.SetAngularVelocity(this.physicsBody.body.GetID(), joltAngVel);
+    // 1. Activate body if we have input/movement intentions to wake up from Jolt sleep
+    if (moveDir.x !== 0.0 || moveDir.y !== 0.0) {
+      gfx3JoltManager.bodyInterface.ActivateBody(this.physicsBody.body.GetID());
+    }
 
-    // Get physics rotation to extract current yaw
-    const currentRot = this.physicsBody.body.GetRotation();
-    const currentPhysQ = new Quaternion(currentRot.GetW(), currentRot.GetX(), currentRot.GetY(), currentRot.GetZ());
+    // Steering Logic - Directly integrate user input into rotation yaw
+    this.rotation += moveDir.x * rotSpeed * (ts / 1000);
+    const PI2 = Math.PI * 2;
+    this.rotation = (this.rotation + Math.PI) % PI2;
+    if (this.rotation < 0) this.rotation += PI2;
+    this.rotation -= Math.PI;
+
+    // Enforce flat physics rotation (0 pitch/roll) to completely prevent tilted physical corners from penetrating the floor mesh and causing the tank to get stuck
+    const qLock = Quaternion.createFromEuler(this.rotation, 0, 0, 'YXZ');
+    const joltQuat = new Gfx3Jolt.Quat(qLock.x, qLock.y, qLock.z, qLock.w);
+    gfx3JoltManager.bodyInterface.SetRotation(this.physicsBody.body.GetID(), joltQuat, Gfx3Jolt.EActivation_Activate);
     
-    // Properly extract world yaw from the physics body orientation
-    // We look at where the mesh forward (-Z) is pointing.
-    const meshForward = currentPhysQ.rotateVector([0, 0, -1]);
-    const physYaw = Math.atan2(meshForward[0], -meshForward[2]);
-    
-    this.rotation = physYaw; 
+    // Ensure Jolt's internal angular velocity is zeroed out to prevent any solver-induced rotation battles
+    gfx3JoltManager.bodyInterface.SetAngularVelocity(this.physicsBody.body.GetID(), new Gfx3Jolt.Vec3(0, 0, 0));
     
     const throttle = moveDir.y;
     const targetVelocity = throttle * speed;
@@ -157,24 +160,63 @@ export class Tank {
     const forward = [Math.sin(this.rotation), 0, -Math.cos(this.rotation)] as vec3;
     const linVel = UT.VEC3_SCALE(forward, this.velocity);
     
+    const pos = this.physicsBody.body.GetPosition();
     const curVel = this.physicsBody.body.GetLinearVelocity();
     
-    // Instead of hard-setting velocity which fights the collision solver, 
-    // we use a PD controller approach (adding forces) to approach the target velocity.
-    const mass = 3000.0;
-    const velDiffX = linVel[0] - curVel.GetX();
-    const velDiffZ = linVel[2] - curVel.GetZ();
+    // Whiskers multi-raycast sliding prediction to prevent wall phasing completely!
+    let finalLinVel = [linVel[0], linVel[2]];
+    const speedLen = Math.sqrt(linVel[0] * linVel[0] + linVel[2] * linVel[2]);
+    if (speedLen > 0.01) {
+        const dx = linVel[0] / speedLen;
+        const dz = linVel[2] / speedLen;
+        
+        // 3 directions: center (0°), left (-30°), right (+30°)
+        const dirs = [
+            [dx, dz],
+            [dx * 0.866 - dz * 0.5, dx * 0.5 + dz * 0.866],
+            [dx * 0.866 + dz * 0.5, -dx * 0.5 + dz * 0.866]
+        ];
+        
+        const rayLength = 1.3 + 0.45; // radius (1.3) + padding (0.45)
+        
+        for (const dir of dirs) {
+            const startX = pos.GetX();
+            const startY = pos.GetY();
+            const startZ = pos.GetZ();
+            
+            const endX = startX + dir[0] * rayLength;
+            const endY = startY;
+            const endZ = startZ + dir[1] * rayLength;
+            
+            const ray = gfx3JoltManager.createRay(startX, startY, startZ, endX, endY, endZ);
+            if (ray.body && ray.normal) {
+                const hitBodyId = ray.body.GetID().GetIndex();
+                const ourBodyId = this.physicsBody.body.GetID().GetIndex();
+                if (hitBodyId !== ourBodyId) {
+                    const nx = ray.normal.GetX();
+                    const nz = ray.normal.GetZ();
+                    const nLen = Math.sqrt(nx * nx + nz * nz);
+                    if (nLen > 0.001) {
+                        const hnx = nx / nLen;
+                        const hnz = nz / nLen;
+                        
+                        // Dot product between desired velocity and normal
+                        const dot = finalLinVel[0] * hnx + finalLinVel[1] * hnz;
+                        if (dot < 0) {
+                            // Substract the component that pushes into the wall
+                            finalLinVel[0] -= dot * hnx;
+                            finalLinVel[1] -= dot * hnz;
+                        }
+                    }
+                }
+            }
+        }
+    }
     
-    // Proportional gain for the velocity controller
-    const kp = 6.0; 
-    const maxForce = 60000.0; 
-    const forceX = Math.max(-maxForce, Math.min(maxForce, velDiffX * mass * kp));
-    const forceZ = Math.max(-maxForce, Math.min(maxForce, velDiffZ * mass * kp));
-    
-    const joltForce = new Gfx3Jolt.Vec3(forceX, 0, forceZ);
-    gfx3JoltManager.bodyInterface.AddForce(this.physicsBody.body.GetID(), joltForce, Gfx3Jolt.EActivation_Activate);
-    
-    const pos = this.physicsBody.body.GetPosition();
+    // Direct velocity assignment ensures perfect responsiveness and bypasses high friction values,
+    // while keeping gravity or vertical recoil impulses (curVel.GetY()) fully managed.
+    const runVel = new Gfx3Jolt.Vec3(finalLinVel[0], curVel.GetY(), finalLinVel[1]);
+    gfx3JoltManager.bodyInterface.SetLinearVelocity(this.physicsBody.body.GetID(), runVel);
 
     // Grounding failsafe (Softened to avoid popping, helps when clipped or airborne)
     const bottomY = pos.GetY() - 0.4; 
@@ -193,11 +235,18 @@ export class Tank {
     
     // Improved Ground Mapping: Cast a ray to find the surface normal
     let targetUp: vec3 = [0, 1, 0];
-    const ray = gfx3JoltManager.createRay(pos.GetX(), pos.GetY() + 0.5, pos.GetZ(), pos.GetX(), pos.GetY() - 3.0, pos.GetZ());
+    // Start raycast slightly below the physical bottom (0.4 below center) to avoid hitting ourselves
+    const startY = pos.GetY() - 0.42;
+    const ray = gfx3JoltManager.createRay(pos.GetX(), startY, pos.GetZ(), pos.GetX(), pos.GetY() - 3.0, pos.GetZ());
     
     // Only accept normals that are mostly vertical (> 45 degrees) to ignore walls
     if (ray.normal && ray.normal.GetY() > 0.707) {
-        targetUp = [ray.normal.GetX(), ray.normal.GetY(), ray.normal.GetZ()];
+        // Double check we didn't hit our own body ID in case of overlaps
+        const hitBodyId = ray.body ? ray.body.GetID().GetIndex() : -1;
+        const ourBodyId = this.physicsBody.body.GetID().GetIndex();
+        if (hitBodyId !== ourBodyId) {
+            targetUp = [ray.normal.GetX(), ray.normal.GetY(), ray.normal.GetZ()];
+        }
     }
     
     // Smoothly lerp towards ground orientation
