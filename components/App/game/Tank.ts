@@ -69,7 +69,7 @@ export class Tank {
 
     this.physicsBody = gfx3JoltManager.addBox({
       width: 2.15, height: 0.8, depth: 3.2,
-      x: 0, y: 25, z: 0,
+      x: 0, y: 0.5, z: 0,
       motionType: Gfx3Jolt.EMotionType_Dynamic,
       layer: JOLT_LAYER_MOVING,
       settings: { 
